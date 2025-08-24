@@ -17,8 +17,6 @@
 # - On (re)configuring the source, we do a one-time width/height check
 #   to align the Replay Buffer with the current reality without waiting
 #   for a new event.
-#
-# Author: You + GPT-5 Thinking
 
 import obspython as obs
 
