@@ -86,11 +86,6 @@ Issues and PRs are welcome. Please keep the core philosophy intact:
 
 ---
 
-## License
-Add a license file to your repository (for example, MIT or Apache‑2.0) and reference it here.
-
----
-
 ## Credits
 - Script author: You.
 - Event‑driven refactor and documentation: collaborative work with GPT‑5 Thinking.
