@@ -43,6 +43,9 @@ def disconnect_source():
     """Clean up current source connection."""
     global source_ref, retry_count
 
+    # Ensure RB is not left running when we drop the monitored source
+    set_replay_buffer(False)
+
     if source_ref:
         sh = obs.obs_source_get_signal_handler(source_ref)
         # Disconnect all signals at once (signal_handler handles duplicates gracefully)
@@ -101,10 +104,25 @@ def connect_source(name: str):
     for sig in ["deactivate", "hide"]:
         obs.signal_handler_connect(sh, sig, on_source_inactive)
 
-    # Sync initial state based on source dimensions
-    w, h = obs.obs_source_get_width(src), obs.obs_source_get_height(src)
-    obs.script_log(obs.LOG_DEBUG, f"Initial dimensions: {w}x{h}")
-    set_replay_buffer(w > 0 and h > 0)
+    # Initial state: avoid dimension heuristics which can be non-zero when not truly active
+    # For hook-capable sources, wait for a real 'hooked' signal if preferred.
+    sid = obs.obs_source_get_id(src)
+    is_hook_capable = sid in ("game_capture", "window_capture")
+
+    if prefer_hook_signals and is_hook_capable:
+        obs.script_log(
+            obs.LOG_DEBUG, "Deferring initial start; waiting for hook signal"
+        )
+    else:
+        # Use OBS's notion of active/showing if available; otherwise, defer to signals
+        showing_fn = getattr(obs, "obs_source_showing", None)
+        active_fn = getattr(obs, "obs_source_active", None)
+        is_showing = bool(showing_fn(src)) if callable(showing_fn) else False
+        is_active = bool(active_fn(src)) if callable(active_fn) else False
+        obs.script_log(
+            obs.LOG_DEBUG, f"Initial state: showing={is_showing} active={is_active}"
+        )
+        set_replay_buffer(is_showing or is_active)
 
 
 # ------------------------

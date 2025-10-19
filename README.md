@@ -1,92 +1,87 @@
-# Event‑Driven Replay Buffer Controller for OBS (Python, no polling)
+# Event‑Driven Replay Buffer for OBS (Python)
 
-A lightweight OBS script that **starts the Replay Buffer when a chosen source becomes active** and **stops it when that source deactivates**—all without interval polling. It uses OBS **signal handlers** (events) for near‑zero CPU overhead and snappy UI updates.
+A small OBS Python script that starts the Replay Buffer only when a chosen source is truly detected and stops it as soon as that source disconnects or becomes inactive. It is fully event‑driven (no polling) and hook‑aware for Game/Window Capture.
 
-> File: `rb_event_driven.py`
-
----
-
-## Why event‑driven?
-Traditional polling scripts wake up every N milliseconds to check source state, which wastes CPU and can still react late. This script listens to OBS **signals** such as `hooked`/`unhooked` (for Game/Window Capture) and generic `activate`/`deactivate`/`show`/`hide` (for all sources). The script runs only when something meaningful happens.
+File: `rb_event_driven.py`
 
 ---
 
-## Features
-- **Zero polling** — reacts purely to OBS signals.
-- **Game/Window Capture aware** — uses `hooked`/`unhooked` when available.
-- **Works with any source type** — falls back to generic visibility/activation signals.
-- **Instant UI feedback** — safely marshals actions to the UI thread and nudges the UI, so the **Replay Buffer button updates immediately**.
-- **One‑time initial sync** — aligns RB state to the current source size on (re)configuration.
-- **Clean lifecycle** — connects/disconnects handlers and releases OBS references correctly.
+## What’s New
+- **True detection‑based start:** Removed the old width/height heuristic that could start RB on load. Starts only on real signals or OBS active/showing state for non‑hook sources.
+- **Hook‑aware behavior:** With “Prefer capture hooks” enabled, Game/Window Capture waits for `hooked` before starting, and stops on `unhooked`.
+- **Stop on disconnect:** When the monitored source is disconnected or changed, RB is explicitly stopped.
+- **Clean reconnection:** Rewires on OBS load or scene‑collection changes with short, bounded retries.
+
+---
+
+## How It Works
+- **Signals first:** Subscribes to the selected source’s signals to drive RB state.
+- **Hook signals:** `hooked` and `unhooked` for `game_capture` and `window_capture` when preferred.
+- **Generic signals:** `activate`, `deactivate`, `show`, `hide` as a universal fallback.
+- **Initial state policy:**
+  - If hook‑capable and hook preference is on, it defers until a real `hooked` event.
+  - Otherwise, it uses OBS’s `obs_source_showing`/`obs_source_active` (when available) for a safe initial sync.
+- **No polling:** The script does not use timers to sample state, only to retry connection during startup.
 
 ---
 
 ## Requirements
-- OBS Studio with **Python scripting** enabled (Tools → Scripts → *Python* tab present).
-- A configured **Replay Buffer** (Settings → Output → Replay Buffer): set a save path and duration.
-
-> Tip: OBS bundles a specific Python version; make sure the installed Python scripting runtime matches your OBS build.
+- **OBS Studio** with Python scripting (Tools → Scripts → Python tab).
+- **Replay Buffer configured** (Settings → Output → Replay Buffer) with save path and duration.
 
 ---
 
 ## Installation
-1. Save the script as `rb_event_driven.py` somewhere on your machine.
-2. In OBS: **Tools → Scripts**.
-3. Select the **Python** tab, click **+**, and choose `rb_event_driven.py`.
-4. The script’s UI will appear in the right‑hand pane.
+- **Add script:** Tools → Scripts → Python tab → `+` → choose `rb_event_driven.py`.
+- **Select source:** In the script UI, choose the source to monitor.
+- **Optional:** Enable “Prefer capture hooks (Game/Window)”.
 
 ---
 
 ## Configuration
-- **Source to monitor**: pick the source that should control the Replay Buffer (e.g., a *Game Capture* or *Window Capture*).
-- **Prefer capture hook signals**: when enabled (default), the script listens for `hooked`/`unhooked` on capture sources for maximum accuracy; generic signals remain connected as a fallback.
-- **Refresh source list**: repopulates the dropdown if you’ve added/renamed sources while the dialog is open.
-
-**Behavior**
-- When the chosen source **hooks/activates/shows**, the script **starts** the Replay Buffer.
-- When it **unhooks/deactivates/hides**, the script **stops** the Replay Buffer.
-- On first setup or when you change the source, the script performs a **one‑time width/height check** to immediately match the current state—still no ongoing polling.
+- **`Monitor Source`:** Pick the source that should control the Replay Buffer.
+- **`Prefer capture hooks (Game/Window)`:** When enabled (default), uses `hooked`/`unhooked` for capture types; generic signals remain connected for coverage.
+- **`Refresh`:** Repopulates the source list without reopening the dialog.
 
 ---
 
-## How it works (under the hood)
-- Subscribes to the selected source’s **signal handler**:
-  - Capture‑specific: `hooked`, `unhooked` (Game/Window Capture).
-  - Generic: `activate`, `deactivate`, `show`, `hide` (any source).
-- Signal callbacks invoke **start/stop** via a small dispatcher that runs on OBS’s **main/UI thread** for safety.
-- A short **one‑shot UI nudge** ensures the Controls dock visually updates immediately after a transition.
-- Listens for `REPLAY_BUFFER_STARTED/STOPPED` **frontend events** to keep UI state crisp even when RB changes outside the script.
+## Expected Behavior
+- **Start on detect:** RB starts when the monitored source emits `hooked`/`activate`/`show` or OBS reports it as active/showing (for non‑hook sources).
+- **Stop on loss:** RB stops on `unhooked`/`deactivate`/`hide` or when the monitored source is disconnected/changed.
+- **No premature start:** RB does not start just because a source has non‑zero dimensions.
+- **Rewire on changes:** On OBS load or scene‑collection changes, the script reconnects and resumes listening.
+
+---
+
+## Supported Sources
+- **Game/Window Capture:** Best experience with hook signals (`hooked`/`unhooked`).
+- **Other sources (Display, Media, Image, etc.):** Controlled via `activate`/`deactivate`/`show`/`hide` and initial `active/showing` state when available.
 
 ---
 
 ## Troubleshooting
-- **RB doesn’t start**: Verify Replay Buffer is enabled and configured in **Settings → Output → Replay Buffer**. Check the script’s log messages in **Help → Log Files → View Current Log** or the Scripts dialog.
-- **Button state lags or needs a hover**: This version marshals calls to the UI thread and nudges the UI; if you still see lag, confirm the Control dock is visible and not hidden by a custom layout.
-- **Capture type doesn’t emit `hooked`/`unhooked`**: That’s expected for some sources. The script still responds to `activate`/`deactivate`/`show`/`hide`.
-- **Multiple scenes / Studio Mode**: By default, the script reacts to the selected source’s signals regardless of whether it’s on **Program**. See *Roadmap* for Program‑only gating.
+- **RB doesn’t start:** Confirm Replay Buffer is configured in Settings → Output → Replay Buffer. Check script logs via Help → Log Files → View Current Log.
+- **Source never hooks:** For Game/Window Capture, open the target window/game. If it still doesn’t hook, try disabling “Prefer capture hooks” and rely on generic signals.
+- **UI lag:** If the Controls dock looks stale, briefly toggle docks/tabs; the script manages RB state even if the button UI lags.
+- **Multiple scenes / Studio Mode:** Script reacts to the selected source irrespective of Program. If you need Program‑only gating, open an issue.
 
 ---
 
-## Roadmap / Ideas
-- **Program‑only gating** (Studio‑mode aware): start only when the source is visible on Program.
-- **Debounce transient losses** (loading screens, alt‑tab) to avoid start/stop thrash.
-- **Multi‑source selection**: start if *any* of several sources are active; stop when *none* are.
-- **Save‑on‑loss**: automatically save the current replay on unhook before stopping RB.
-- **Automation toggle hotkey**: quickly suspend/resume automation during rehearsals.
-- **Scene/profile resilience**: rewire and resync on scene collection/profile changes.
+## Notes and Limitations
+- **No polling:** All changes are event‑driven; timers are only used for short retries on startup.
+- **Source names:** The script binds by source name; renaming requires re‑selection from the list.
+- **Hook availability:** Not all sources emit `hooked`/`unhooked`; generic signals provide coverage.
+
+---
+
+## Quick Start
+- **Pick a capture source** (e.g., Game Capture) and keep “Prefer capture hooks” enabled.
+- **Open the game/window:** RB should start when the source hooks, and stop when it unhooks or is hidden.
+- **Try a non‑hook source:** Disable hook preference if necessary and verify start/stop on show/hide.
 
 ---
 
 ## Contributing
-Issues and PRs are welcome. Please keep the core philosophy intact:
-- No polling.
-- Minimal allocations in callbacks.
-- Clean connect/disconnect on settings change and unload.
-- Clear, level‑appropriate logging (INFO for transitions, DEBUG for detail).
-
----
-
-## Credits
-- Script author: You.
-- Event‑driven refactor and documentation: collaborative work with GPT‑5 Thinking.
+- **Principles:** No polling, minimal work in callbacks, clean connect/disconnect, clear logging (INFO for transitions, DEBUG for detail).
+- **Issues/PRs:** Welcome for improvements such as Program‑only gating, debounce, or multi‑source logic.
 
