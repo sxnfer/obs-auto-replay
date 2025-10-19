@@ -1,3 +1,8 @@
+import os
+import platform
+import shutil
+import subprocess
+
 import obspython as obs
 
 # ------------------------
@@ -8,6 +13,8 @@ source_ref = None
 prefer_hook_signals = True
 retry_count = 0
 MAX_RETRIES = 6
+play_sound_on_save = False
+sound_file_path = ""
 
 
 # ------------------------
@@ -138,6 +145,11 @@ def on_frontend_event(event):
         if source_name:
             connect_source(source_name)
 
+    # Play confirmation sound on replay buffer saved
+    rb_saved_evt = getattr(obs, "OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED", None)
+    if rb_saved_evt is not None and event == rb_saved_evt:
+        try_play_save_sound()
+
 
 def populate_sources(list_prop):
     """Fill dropdown with available sources."""
@@ -183,19 +195,36 @@ def script_properties():
     obs.obs_properties_add_bool(
         props, "prefer_hook_signals", "Prefer capture hooks (Game/Window)"
     )
+    obs.obs_properties_add_bool(
+        props, "play_sound_on_save", "Play sound when clip saves"
+    )
+    obs.obs_properties_add_path(
+        props,
+        "sound_file",
+        "Sound file (e.g., WAV/MP3)",
+        obs.OBS_PATH_FILE,
+        "Audio files (*.wav *.mp3 *.ogg *.flac);;All files (*.*)",
+        None,
+    )
+    obs.obs_properties_add_button(
+        props, "test_sound", "Test Sound", on_test_sound_clicked
+    )
     obs.obs_properties_add_button(props, "refresh", "Refresh", on_refresh_clicked)
     return props
 
 
 def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "prefer_hook_signals", True)
+    obs.obs_data_set_default_bool(settings, "play_sound_on_save", False)
 
 
 def script_update(settings):
-    global source_name, prefer_hook_signals
+    global source_name, prefer_hook_signals, play_sound_on_save, sound_file_path
 
     new_name = obs.obs_data_get_string(settings, "source_name")
     prefer_hook_signals = obs.obs_data_get_bool(settings, "prefer_hook_signals")
+    play_sound_on_save = obs.obs_data_get_bool(settings, "play_sound_on_save")
+    sound_file_path = obs.obs_data_get_string(settings, "sound_file") or ""
 
     if new_name != source_name:
         source_name = new_name
@@ -211,3 +240,98 @@ def script_load(settings):
 
 def script_unload():
     disconnect_source()
+
+
+# ------------------------
+# Sound Playback
+# ------------------------
+def play_sound_file(path: str, allow_beep: bool = True, context: str = ""):
+    """Cross-platform, non-blocking playback of a local audio file.
+
+    Falls back to a console beep if no player is available and allow_beep=True.
+    """
+    path = (path or "").strip()
+    if not path or not os.path.isfile(path):
+        if allow_beep:
+            print("\a", end="")
+            msg = f"{context + ' - ' if context else ''}beep (no/invalid file)"
+            obs.script_log(obs.LOG_DEBUG, msg)
+        else:
+            obs.script_log(
+                obs.LOG_WARNING,
+                f"{context + ' - ' if context else ''}sound file missing: {path}",
+            )
+        return
+
+    system = platform.system().lower()
+    try:
+        if system == "windows":
+            try:
+                import winsound  # type: ignore
+
+                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                obs.script_log(obs.LOG_INFO, f"{context} played (winsound)")
+                return
+            except Exception as e:  # Fallback to PowerShell
+                cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "[console]::beep(1000,100)",
+                ]
+                subprocess.Popen(cmd)
+                obs.script_log(
+                    obs.LOG_DEBUG, f"{context} winsound failed, PowerShell beep: {e}"
+                )
+                return
+
+        if system == "darwin":  # macOS
+            if shutil.which("afplay"):
+                subprocess.Popen(["afplay", path])
+                obs.script_log(obs.LOG_INFO, f"{context} played (afplay)")
+                return
+
+        # Linux or unknown: try paplay/aplay/ffplay
+        for player in ("paplay", "aplay", "ffplay"):
+            exe = shutil.which(player)
+            if not exe:
+                continue
+            if player == "ffplay":
+                subprocess.Popen(
+                    [exe, "-nodisp", "-autoexit", path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [exe, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            obs.script_log(obs.LOG_INFO, f"{context} played ({player})")
+            return
+
+        # As a last resort: console beep
+        if allow_beep:
+            print("\a", end="")
+            obs.script_log(obs.LOG_DEBUG, f"{context} console beep fallback")
+    except Exception as e:
+        obs.script_log(obs.LOG_WARNING, f"{context} failed to play sound: {e}")
+
+
+def try_play_save_sound():
+    """Attempt to play the configured sound asynchronously for replay save."""
+    if not play_sound_on_save:
+        return
+    path = (sound_file_path or "").strip()
+    if not path:
+        obs.script_log(obs.LOG_WARNING, "Clip saved - sound disabled (no file set)")
+        return
+    play_sound_file(path, allow_beep=True, context="Replay save sound")
+
+
+def on_test_sound_clicked(props, prop):
+    """UI button callback to test the selected sound file."""
+    path = (sound_file_path or "").strip()
+    if not path:
+        obs.script_log(obs.LOG_WARNING, "Test Sound - no file set; playing beep")
+    play_sound_file(path, allow_beep=True, context="Test sound")
+    return True
