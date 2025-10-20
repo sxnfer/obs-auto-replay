@@ -2,6 +2,11 @@
 # Starts RB when a chosen source becomes active/hooked; stops when it deactivates/unhooks.
 # Fixes startup race with a short retry routine until OBS finishes restoring sources.
 
+import os
+import platform
+import shutil
+import subprocess
+
 import obspython as obs
 
 # ------------------------
@@ -16,6 +21,11 @@ _ui_refresh_scheduled = False
 # Startup/collection reload resilience
 _connect_retry_cb = None
 _connect_retry_attempt = 0
+_CONNECT_MAX_ATTEMPTS = 6
+_CONNECT_MAX_DELAY_MS = 2000
+
+# Sound configuration
+sound_file_path = ""
 
 
 # ------------------------
@@ -34,22 +44,19 @@ def _run_on_main_thread(fn):
     obs.timer_add(thunk, 1)  # hop to next main-loop tick
 
 
-def _ensure_rb_started():
-    def _do_start():
-        if not obs.obs_frontend_replay_buffer_active():
+def _set_rb(active: bool):
+    """Ensure RB state matches 'active'. Schedules work on main thread."""
+
+    def _apply():
+        is_active = obs.obs_frontend_replay_buffer_active()
+        if active and not is_active:
             obs.obs_frontend_replay_buffer_start()
             obs.script_log(obs.LOG_INFO, "Replay Buffer: start requested")
-
-    _run_on_main_thread(_do_start)
-
-
-def _ensure_rb_stopped():
-    def _do_stop():
-        if obs.obs_frontend_replay_buffer_active():
+        elif not active and is_active:
             obs.obs_frontend_replay_buffer_stop()
             obs.script_log(obs.LOG_INFO, "Replay Buffer: stop requested")
 
-    _run_on_main_thread(_do_stop)
+    _run_on_main_thread(_apply)
 
 
 # ------------------------
@@ -72,34 +79,12 @@ def _schedule_ui_refresh():
 # ------------------------
 # Signal callbacks
 # ------------------------
-def on_hooked(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: hooked from '{source_name}'")
-    _ensure_rb_started()
+def _make_signal_cb(sig: str, start: bool):
+    def _cb(cd):
+        obs.script_log(obs.LOG_DEBUG, f"Signal: {sig} for '{source_name}'")
+        _set_rb(start)
 
-
-def on_unhooked(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: unhooked from '{source_name}'")
-    _ensure_rb_stopped()
-
-
-def on_activate(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: activate for '{source_name}'")
-    _ensure_rb_started()
-
-
-def on_deactivate(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: deactivate for '{source_name}'")
-    _ensure_rb_stopped()
-
-
-def on_show(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: show for '{source_name}'")
-    _ensure_rb_started()
-
-
-def on_hide(cd):
-    obs.script_log(obs.LOG_DEBUG, f"Signal: hide for '{source_name}'")
-    _ensure_rb_stopped()
+    return _cb
 
 
 # ------------------------
@@ -151,20 +136,19 @@ def _connect_to_source(name: str):
     source_ref = src
     sh = obs.obs_source_get_signal_handler(src)
 
-    # Prefer capture hook signals (Game/Window Capture), harmless on others
+    # Wire signals with minimal, unified callbacks
+    to_wire = []
     if prefer_hook_signals:
-        obs.signal_handler_connect(sh, "hooked", on_hooked)
-        wired_signals.append(("hooked", on_hooked))
-        obs.signal_handler_connect(sh, "unhooked", on_unhooked)
-        wired_signals.append(("unhooked", on_unhooked))
+        to_wire += [("hooked", True), ("unhooked", False)]
+    to_wire += [
+        ("activate", True),
+        ("deactivate", False),
+        ("show", True),
+        ("hide", False),
+    ]
 
-    # Generic visibility/activation signals (fallback + extra coverage)
-    for sig, cb in (
-        ("activate", on_activate),
-        ("deactivate", on_deactivate),
-        ("show", on_show),
-        ("hide", on_hide),
-    ):
+    for sig, is_start in to_wire:
+        cb = _make_signal_cb(sig, is_start)
         obs.signal_handler_connect(sh, sig, cb)
         wired_signals.append((sig, cb))
 
@@ -181,10 +165,7 @@ def _sync_now_with_dimensions(src):
     obs.script_log(
         obs.LOG_DEBUG, f"Initial size for '{obs.obs_source_get_name(src)}': {w}x{h}"
     )
-    if w > 0 and h > 0:
-        _ensure_rb_started()
-    else:
-        _ensure_rb_stopped()
+    _set_rb(w > 0 and h > 0)
 
 
 # ------------------------
@@ -196,12 +177,11 @@ def _schedule_connect_retry():
     if not source_name:
         return
     # cap retries (~3–4 seconds typical; can raise if needed)
-    max_attempts = 6
-    if _connect_retry_attempt >= max_attempts:
+    if _connect_retry_attempt >= _CONNECT_MAX_ATTEMPTS:
         return
 
     _connect_retry_attempt += 1
-    delay = min(200 * (2 ** (_connect_retry_attempt - 1)), 2000)
+    delay = min(200 * (2 ** (_connect_retry_attempt - 1)), _CONNECT_MAX_DELAY_MS)
 
     def fire():
         global _connect_retry_cb
@@ -225,6 +205,11 @@ def _on_frontend_event(event):
         obs.OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED,
     ):
         _schedule_ui_refresh()
+
+    # Play confirmation sound when a replay is saved
+    rb_saved_evt = getattr(obs, "OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVED", None)
+    if rb_saved_evt is not None and event == rb_saved_evt:
+        _play_save_sound()
 
     # After OBS finishes loading / when collections change, try (re)connecting
     if event in (
@@ -285,6 +270,15 @@ def script_properties():
         "prefer_hook_signals",
         "Prefer capture hook signals (Game/Window Capture)",
     )
+    obs.obs_properties_add_path(
+        props,
+        "sound_file",
+        "Sound file (e.g., WAV/MP3)",
+        obs.OBS_PATH_FILE,
+        "Audio files (*.wav *.mp3 *.ogg *.flac);;All files (*.*)",
+        None,
+    )
+    obs.obs_properties_add_button(props, "test_sound", "Test Sound", _on_test_sound)
     obs.obs_properties_add_button(
         props, "refresh_sources", "Refresh source list", _on_refresh_sources
     )
@@ -296,9 +290,10 @@ def script_defaults(settings):
 
 
 def script_update(settings):
-    global source_name, prefer_hook_signals
+    global source_name, prefer_hook_signals, sound_file_path
     new_name = obs.obs_data_get_string(settings, "source_name")
     prefer_hook_signals = obs.obs_data_get_bool(settings, "prefer_hook_signals")
+    sound_file_path = obs.obs_data_get_string(settings, "sound_file") or ""
 
     if new_name != source_name:
         source_name = new_name
@@ -317,3 +312,69 @@ def script_load(settings):
 
 def script_unload():
     _disconnect_current()
+
+
+# ------------------------
+# Sound playback
+# ------------------------
+def _play_sound_file(path: str):
+    """Cross-platform, non-blocking playback of a local audio file.
+
+    If path is empty or missing, do nothing silently (default: no sound).
+    """
+    p = (path or "").strip()
+    if not p:
+        return
+    if not os.path.isfile(p):
+        obs.script_log(obs.LOG_WARNING, f"Sound file not found: {p}")
+        return
+
+    system = platform.system().lower()
+    try:
+        if system == "windows":
+            try:
+                import winsound  # type: ignore
+
+                winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                return
+            except Exception:
+                pass  # fall through to generic players
+
+        if system == "darwin":  # macOS
+            if shutil.which("afplay"):
+                subprocess.Popen(["afplay", p])
+                return
+
+        # Linux or unknown: try common players
+        for player in ("paplay", "aplay", "ffplay"):
+            exe = shutil.which(player)
+            if not exe:
+                continue
+            if player == "ffplay":
+                subprocess.Popen(
+                    [exe, "-nodisp", "-autoexit", p],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                subprocess.Popen(
+                    [exe, p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            return
+    except Exception as e:
+        obs.script_log(obs.LOG_WARNING, f"Failed to play sound: {e}")
+
+
+def _play_save_sound():
+    """Play configured sound when a replay is saved (if any)."""
+    if not sound_file_path:
+        return  # default: no sound
+    _play_sound_file(sound_file_path)
+
+
+def _on_test_sound(props, prop):
+    """UI callback to test the selected sound."""
+    if not sound_file_path:
+        obs.script_log(obs.LOG_WARNING, "Test Sound: no file selected")
+    _play_sound_file(sound_file_path)
+    return True
