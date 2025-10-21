@@ -28,7 +28,7 @@ File: `rb_event_driven.py`
 
 ## Requirements
 - **OBS Studio** with Python scripting (Tools → Scripts → Python tab).
-- **Replay Buffer configured** (Settings → Output → Replay Buffer) with save path and duration.
+- **Replay Buffer configured** (Settings → Output → Replay Buffer) with save path and duration.D
 
 ---
 
@@ -43,7 +43,7 @@ File: `rb_event_driven.py`
 - **`Monitor Source`:** Pick the source that should control the Replay Buffer.
 - **`Prefer capture hooks (Game/Window)`:** When enabled (default), uses `hooked`/`unhooked` for capture types; generic signals remain connected for coverage.
 - **`Play sound when clip saves`:** When enabled, the script plays a short sound on successful Replay Buffer save (useful confirmation).
-- **`Sound file (e.g., WAV/MP3)`:** Choose an audio file to play. Cross‑platform playback attempts: on Windows uses `winsound` for WAV, then `ffplay` (if available) or a PowerShell MediaPlayer fallback for MP3/other formats; on macOS uses `afplay`; on Linux tries `paplay`/`aplay`/`ffplay`.
+- **`Sound file (e.g., WAV/MP3)`:** Choose an audio file to play. Cross‑platform playback attempts: on Windows uses `winsound` for WAV, then `ffplay` (hidden, if available) or a hidden PowerShell MediaPlayer fallback for MP3/other formats; on macOS uses `afplay`; on Linux tries `paplay`/`aplay`/`ffplay`.
 - **`Test Sound`:** Click to immediately play the selected sound (falls back to a simple beep if no/invalid file).
 - **`Refresh`:** Repopulates the source list without reopening the dialog.
 

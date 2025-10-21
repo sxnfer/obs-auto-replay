@@ -353,10 +353,17 @@ def _play_sound_file(path: str):
             if not exe:
                 continue
             if player == "ffplay":
+                # On Windows, avoid flashing a console window
+                _kwargs = {}
+                if system == "windows":
+                    _kwargs["creationflags"] = getattr(
+                        subprocess, "CREATE_NO_WINDOW", 0
+                    )
                 subprocess.Popen(
                     [exe, "-nodisp", "-autoexit", p],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    **_kwargs,
                 )
             else:
                 subprocess.Popen(
@@ -366,7 +373,7 @@ def _play_sound_file(path: str):
 
         # Final Windows fallback for non-WAV (e.g., MP3): use PowerShell MediaPlayer
         if system == "windows":
-            ps = shutil.which("powershell") or shutil.which("pwsh")
+            ps = shutil.which("pwsh") or shutil.which("powershell")
             if ps:
                 try:
                     # Use PresentationCore MediaPlayer to play most common audio types.
@@ -374,20 +381,37 @@ def _play_sound_file(path: str):
 
                     uri = Path(p).resolve().as_uri()
                     ps_cmd = (
-                        "Add-Type -AssemblyName presentationCore; "
-                        "$m=New-Object System.Windows.Media.MediaPlayer; "
-                        f"$m.Open([Uri]\"{uri}\"); "
-                        "$m.Volume=1; $m.Play(); "
-                        # Keep the host process alive until playback finishes if duration known
-                        "Start-Sleep -Milliseconds 300; "
-                        "if($m.NaturalDuration.HasTimeSpan){"
-                        " while($m.Position -lt $m.NaturalDuration.TimeSpan){Start-Sleep -Milliseconds 200}}"
+                        "Add-Type -AssemblyName PresentationCore; "
+                        "$m = New-Object System.Windows.Media.MediaPlayer; "
+                        "$null = Register-ObjectEvent -InputObject $m -EventName MediaEnded -Action { $global:__obs_done = $true }; "
+                        "$null = Register-ObjectEvent -InputObject $m -EventName MediaFailed -Action { $global:__obs_failed = $true }; "
+                        "$null = Register-ObjectEvent -InputObject $m -EventName MediaOpened -Action { $global:__obs_opened = $true }; "
+                        f'$m.Open([Uri]"{uri}"); '
+                        "$m.Volume = 1.0; $m.Play(); "
+                        "$sw = [System.Diagnostics.Stopwatch]::StartNew(); "
+                        "while(-not $global:__obs_done -and -not $global:__obs_failed -and $sw.Elapsed.TotalSeconds -lt 30){ Start-Sleep -Milliseconds 100 }"
                     )
-                    subprocess.Popen(
-                        [ps, "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    # Build args based on host (Windows PowerShell vs PowerShell Core)
+                    if ps.lower().endswith("powershell.exe"):
+                        args = [
+                            ps,
+                            "-NoProfile",
+                            "-NonInteractive",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-STA",
+                            "-Command",
+                            ps_cmd,
+                        ]
+                    else:
+                        args = [ps, "-NoProfile", "-NonInteractive", "-Command", ps_cmd]
+                    # Hide console window on Windows
+                    kwargs = {
+                        "stdout": subprocess.DEVNULL,
+                        "stderr": subprocess.DEVNULL,
+                    }
+                    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    subprocess.Popen(args, **kwargs)
                     return
                 except Exception:
                     pass
