@@ -335,8 +335,10 @@ def _play_sound_file(path: str):
             try:
                 import winsound  # type: ignore
 
-                winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC)
-                return
+                # winsound supports WAV only; use it for .wav paths
+                if p.lower().endswith(".wav"):
+                    winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    return
             except Exception:
                 pass  # fall through to generic players
 
@@ -345,7 +347,7 @@ def _play_sound_file(path: str):
                 subprocess.Popen(["afplay", p])
                 return
 
-        # Linux or unknown: try common players
+        # Linux/Windows/unknown: try common CLI players
         for player in ("paplay", "aplay", "ffplay"):
             exe = shutil.which(player)
             if not exe:
@@ -361,6 +363,34 @@ def _play_sound_file(path: str):
                     [exe, p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
             return
+
+        # Final Windows fallback for non-WAV (e.g., MP3): use PowerShell MediaPlayer
+        if system == "windows":
+            ps = shutil.which("powershell") or shutil.which("pwsh")
+            if ps:
+                try:
+                    # Use PresentationCore MediaPlayer to play most common audio types.
+                    from pathlib import Path
+
+                    uri = Path(p).resolve().as_uri()
+                    ps_cmd = (
+                        "Add-Type -AssemblyName presentationCore; "
+                        "$m=New-Object System.Windows.Media.MediaPlayer; "
+                        f"$m.Open([Uri]\"{uri}\"); "
+                        "$m.Volume=1; $m.Play(); "
+                        # Keep the host process alive until playback finishes if duration known
+                        "Start-Sleep -Milliseconds 300; "
+                        "if($m.NaturalDuration.HasTimeSpan){"
+                        " while($m.Position -lt $m.NaturalDuration.TimeSpan){Start-Sleep -Milliseconds 200}}"
+                    )
+                    subprocess.Popen(
+                        [ps, "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+                except Exception:
+                    pass
     except Exception as e:
         obs.script_log(obs.LOG_WARNING, f"Failed to play sound: {e}")
 
